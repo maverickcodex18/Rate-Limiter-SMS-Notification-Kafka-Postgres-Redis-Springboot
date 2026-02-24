@@ -32,12 +32,6 @@ Client
 | Messaging | Apache Kafka (Confluent 7.5) |
 | Containers | Docker, Docker Compose |
 
-## Prerequisites
-
-- Java 21
-- Maven 3.9+
-- Docker & Docker Compose
-
 ## Quick Start
 
 ```bash
@@ -108,75 +102,6 @@ Send a rate-limited notification. Publishes to Kafka `sms-outbound` topic on suc
 | 404 | No config exists for this userId |
 | 429 | Rate limit exceeded |
 | 503 | Kafka or Postgres unreachable |
-
-## How Rate Limiting Works
-
-1. `POST /api/config` upserts a row in `rate_limit_store` with `current_count = 0`
-2. `POST /api/send` checks the user's counter against their limit
-3. **Lazy refresh**: if `now - last_refresh_time >= time_window`, counter resets inline — no cron jobs
-4. **Phase 1**: counter increments only after Kafka confirms delivery (`SELECT ... FOR UPDATE` lock held across Kafka call)
-5. **Phase 2**: Redis increments counter before Kafka publish (over-count tradeoff for speed)
-6. **Concurrency**: Phase 1 uses row-level locks. Phase 2 uses Redis operations (future: Lua scripts for atomicity)
-
-## Redis Fallback
-
-When Redis goes down, the `SendMessage` controller catches Redis exceptions and falls back to the Postgres path automatically:
-
-- Rate limiting correctness is fully preserved
-- Throughput drops for same-user bursts (row lock serialization)
-- Different users remain fully parallel
-- Recovery is automatic when Redis comes back
-
-## Project Structure
-
-```
-src/main/java/com/example/RateLimitedSMSGateway/
-├── Endpoints/
-│   ├── CreateUserConfig.java           # POST /api/config
-│   └── SendMessage.java                # POST /api/send (Redis → Postgres fallback)
-├── Services/
-│   ├── SendMessagePostgresService.java # Phase 1: SELECT FOR UPDATE + Kafka
-│   ├── SendMessageRedisService.java    # Phase 2: Redis cache + counter
-│   ├── RedisService.java               # Redis CRUD (CrudRepository)
-│   ├── UpsertDB.java                   # Config persistence (upsert)
-│   └── KafkaConfig.java                # Kafka producer + @KafkaListener consumer
-├── Entity/
-│   ├── PostgresEntity.java             # JPA entity for rate_limit_store
-│   └── RedisEntity.java                # @RedisHash entity
-├── Repository/
-│   ├── PostgresRepository.java         # findByUserIdForUpdate (PESSIMISTIC_WRITE)
-│   └── RedisRepository.java            # CrudRepository<RedisEntity, Integer>
-├── DTO/
-│   └── AllRecords.java                 # Request/response Java Records
-└── CustomExceptions/
-    ├── CustomExceptionTemplate.java    # Base exception (message + statusCode)
-    ├── UserNotFoundException.java      # 404
-    ├── RateLimitExceededException.java # 429
-    ├── KafkaPublishException.java      # 503
-    └── GlobalExceptionRepository.java  # @RestControllerAdvice handler
-```
-
-## Docker Services
-
-| Service | Image | Port | Health Check |
-|---------|-------|------|-------------|
-| app | Built from Dockerfile | 8080 | depends_on all others |
-| postgres | postgres:15-alpine | 5432 | `pg_isready` |
-| redis | redis:8.0.6-alpine3.21 | 6379 | `redis-cli ping` |
-| kafka | confluentinc/cp-kafka:7.5.0 | 9092, 29092 | `nc -z localhost 9092` |
-| zookeeper | confluentinc/cp-zookeeper:7.5.0 | 2181 | — |
-
-All services communicate over the `RateLimitedSMSGatewayNETWORK` bridge network.
-
-## Testing
-
-`api-tests.http` contains test cases for IntelliJ HTTP Client covering:
-- Config CRUD, validation errors (400), boundary values
-- Send happy path, rate limit exceeded (429), user not found (404)
-- Lazy refresh (window expiry resets counter)
-- Config update resets counter mid-window
-- Multi-user isolation
-- Rapid-fire manual concurrency testing
 
 ## Stopping
 
